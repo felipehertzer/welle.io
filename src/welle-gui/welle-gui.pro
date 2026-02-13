@@ -65,6 +65,7 @@ TRANSLATIONS = i18n/de_DE.ts \
     i18n/nb_NO.ts \
     i18n/fr_FR.ts \
     i18n/pl_PL.ts \
+    i18n/pt_BR.ts \
     i18n/ru_RU.ts \
     i18n/nl_NL.ts
 

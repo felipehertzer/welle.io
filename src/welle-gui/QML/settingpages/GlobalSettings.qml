@@ -121,6 +121,7 @@ Item {
                         ListElement { label: "Nederlands"; langCode: "nl_NL" }
                         ListElement { label: "Norsk bokmål"; langCode: "nb_NO" }
                         ListElement { label: "Polski"; langCode: "pl_PL" }
+                        ListElement { label: "Português (Brasil)"; langCode: "pt_BR" }
                         ListElement { label: "Ру́сский"; langCode: "ru_RU" }
                         ListElement { label: "Español"; langCode: "es_ES" }
                     }

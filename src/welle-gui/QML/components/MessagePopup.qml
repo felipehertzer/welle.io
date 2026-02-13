@@ -25,7 +25,6 @@
  
 import QtQuick
 import QtQuick.Controls
-import Qt5Compat.GraphicalEffects
 
 import "../texts"
 
@@ -67,15 +66,9 @@ Popup {
             id:exitImage
             anchors.left: parent.left
             anchors.verticalCenter: parent.verticalCenter
-            source: "qrc:/icons/welle_io_icons/20x20@2/exit.png"
+            source: "qrc:/icons/welle_io_icons/exit_white.svg"
             height: Units.dp(30)
             width: height
-        }
-        
-        ColorOverlay {
-            anchors.fill: exitImage
-            source: exitImage
-            color: "white"
         }
 
         MouseArea {

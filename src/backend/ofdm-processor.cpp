@@ -126,9 +126,36 @@ void OFDMProcessor::restart()
     syncBufferIndex    = 0;
     sLevel             = 0;
     localPhase         = 0;
-    input.restart();
-    running            = true;
-    threadHandle       = std::thread(&OFDMProcessor::run, this);
+    bool inputRestarted = false;
+    try {
+        inputRestarted = input.restart();
+    }
+    catch (const std::exception& e) {
+        std::clog << "OFDM-processor: input restart failed: " << e.what() << std::endl;
+        radioInterface.onMessage(message_level_t::Error, "Input restart failed");
+        return;
+    }
+    catch (...) {
+        std::clog << "OFDM-processor: input restart failed with unknown exception" << std::endl;
+        radioInterface.onMessage(message_level_t::Error, "Input restart failed");
+        return;
+    }
+
+    if (not inputRestarted) {
+        std::clog << "OFDM-processor: input restart returned false" << std::endl;
+        return;
+    }
+
+    running = true;
+    try {
+        threadHandle = std::thread(&OFDMProcessor::run, this);
+    }
+    catch (const std::exception& e) {
+        running = false;
+        input.stop();
+        std::clog << "OFDM-processor: cannot start processing thread: " << e.what() << std::endl;
+        radioInterface.onMessage(message_level_t::Error, "Cannot start processing thread");
+    }
 }
 
 class InputFailure { };

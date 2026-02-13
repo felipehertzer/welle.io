@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.2)
+cmake_minimum_required(VERSION 4.2.3)
 
 project(Welle.Io LANGUAGES C CXX)
 

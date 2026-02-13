@@ -26,7 +26,6 @@
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Controls
-import Qt5Compat.GraphicalEffects
 
 // Import custom styles
 import "texts"
@@ -165,15 +164,7 @@ ViewBaseFrame {
                         width: antennaIcon.width
                         height: antennaIcon.height
                         visible: false
-                        source: "qrc:/icons/welle_io_icons/20x20@2/antenna_no_signal.png"
-                    }
-                    
-                    ColorOverlay {
-                        id: antennaIconNoSignalRed
-                        visible: true
-                        anchors.fill: antennaIconNoSignal
-                        source: antennaIconNoSignal
-                        color: "red"
+                        source: "qrc:/icons/welle_io_icons/antenna_no_signal_red.svg"
                     }
                     
                     Connections {
@@ -277,15 +268,15 @@ ViewBaseFrame {
 
     function setAntennaVisibility() {
         if (!radioController.isPlaying && !radioController.isChannelScan) {
-            antennaIconNoSignalRed.visible = false;
+            antennaIconNoSignal.visible = false;
             antennaIcon.visible = false;
             return
         }
         if (antennaSymbol.isSignal) {
-            antennaIconNoSignalRed.visible = false;
+            antennaIconNoSignal.visible = false;
             antennaIcon.visible = true;
         } else {
-            antennaIconNoSignalRed.visible = true;
+            antennaIconNoSignal.visible = true;
             antennaIcon.visible = false;
             antennaSymbol.opacity = 1.0
             effect.stop()

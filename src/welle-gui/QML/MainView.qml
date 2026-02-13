@@ -28,7 +28,6 @@ import QtQuick.Layouts
 import QtQuick.Controls
 import QtQuick.Controls.Universal
 import QtQuick.Window
-import Qt5Compat.GraphicalEffects
 import QtCore
 
 import "texts"

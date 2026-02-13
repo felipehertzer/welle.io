@@ -663,6 +663,13 @@ QString CGUIHelper::mapToLanguage(QString Language)
         Language = "fr_FR";
     }
 
+    // Special handling for Portuguese
+    if(Language == "pt" || Language == "pt_PT" || Language == "pt_AO" || Language == "pt_MZ")
+    {
+        qDebug() << "main:" <<  "Use pt_BR instead of" << Language;
+        Language = "pt_BR";
+    }
+
     // Set new language
     qDebug() << "main:" <<  "Set language" << Language;
     return Language;

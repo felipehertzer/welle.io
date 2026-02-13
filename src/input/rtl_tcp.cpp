@@ -103,13 +103,33 @@ bool CRTL_TCP_Client::restart(void)
         return true;
     }
 
+    // Clean up stale thread objects from previous failed starts before
+    // creating new worker threads. Assigning over a joinable std::thread
+    // would call std::terminate.
+    if (agcThread.joinable() || receiveThread.joinable() || networkBufferThread.joinable()) {
+        std::unique_lock<std::mutex> lock(mutex);
+        sock.close();
+        rtlsdrRunning = false;
+        connected = false;
+        lock.unlock();
+
+        if (receiveThread.joinable()) {
+            receiveThread.join();
+        }
+        agcRunning = false;
+        if (agcThread.joinable()) {
+            agcThread.join();
+        }
+        if (networkBufferThread.joinable()) {
+            networkBufferThread.join();
+        }
+    }
+
     rtlsdrRunning = true;
 
     networkBufferThread = std::thread(&CRTL_TCP_Client::networkBufferCopy, this);
-    networkBufferThread.detach();
 
     receiveThread = std::thread(&CRTL_TCP_Client::receiveAndReconnect, this);
-    receiveThread.detach();
 
     // Wait so that the other thread has a chance to establish the connection
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
@@ -135,17 +155,18 @@ void CRTL_TCP_Client::stop(void)
     // Close connection
     sock.close();
 
-    agcRunning = false;
     rtlsdrRunning = false;
+    connected = false;
 
     lock.unlock();
 
-    if (agcThread.joinable()) {
-        agcThread.join();
-    }
-
     if (receiveThread.joinable()) {
         receiveThread.join();
+    }
+
+    agcRunning = false;
+    if (agcThread.joinable()) {
+        agcThread.join();
     }
 
     if (networkBufferThread.joinable()) {
@@ -223,9 +244,10 @@ void CRTL_TCP_Client::receiveData(void)
                 handleDisconnect();
             }
             else {
-                std::wstring s;
                 int error = WSAGetLastError();
-                throw std::runtime_error("RTL_TCP_CLIENT recv error: " +  std::to_string(error));
+                std::clog << "RTL_TCP_CLIENT recv error: " << error << std::endl;
+                handleDisconnect();
+                return;
             }
 #else
             if (errno == EAGAIN) {
@@ -239,7 +261,9 @@ void CRTL_TCP_Client::receiveData(void)
             }
             else {
                 std::string errstr = strerror(errno);
-                throw std::runtime_error("RTL_TCP_CLIENT recv error: " + errstr);
+                std::clog << "RTL_TCP_CLIENT recv error: " << errstr << std::endl;
+                handleDisconnect();
+                return;
             }
 #endif
         }
@@ -252,7 +276,18 @@ void CRTL_TCP_Client::receiveData(void)
         }
     }
 
+    if (read == 0 || !connected || !sock.valid()) {
+        return;
+    }
+
+    size_t payloadOffset = 0;
+
     if (firstData) {
+        if (read < sizeof(dongle_info_t)) {
+            // Incomplete first packet (e.g. connection closed during startup).
+            return;
+        }
+
         firstData = false;
 
         // Get dongle information
@@ -288,14 +323,25 @@ void CRTL_TCP_Client::receiveData(void)
             setGain(currentGainCount);
             sendRate(INPUT_RATE);
             sendVFO(frequency);  
+
+            payloadOffset = sizeof(dongle_info_t);
         }
         else {
             std::clog << "RTL_TCP_CLIENT: Didn't find the \"RTL0\" magic key." <<
                 std::endl;
+            handleDisconnect();
+            agcRunning = false;
+            rtlsdrRunning = false;
+            return;
         }
     }
 
-    sampleNetworkBuffer.putDataIntoBuffer(buffer.data(), buffer.size());
+    if (read <= payloadOffset) {
+        return;
+    }
+
+    const size_t payloadSize = read - payloadOffset;
+    sampleNetworkBuffer.putDataIntoBuffer(buffer.data() + payloadOffset, payloadSize);
 
     // First fill the complete buffer to avoid sound outtages if the stream data rate is not stable e.g. over WIFI
     if(!firstFilledNetworkBuffer) {
@@ -316,7 +362,8 @@ void CRTL_TCP_Client::receiveData(void)
     minAmplitude = 255;
     maxAmplitude = 0;
 
-    for (const auto b : buffer) {
+    for (size_t i = payloadOffset; i < read; i++) {
+        const auto b = buffer[i];
         if (minAmplitude > b)
             minAmplitude = b;
         if (maxAmplitude < b)
@@ -432,145 +479,203 @@ void CRTL_TCP_Client::setPort(uint16_t Port)
 
 void CRTL_TCP_Client::receiveAndReconnect()
 {
-    while (rtlsdrRunning) {
-        std::unique_lock<std::mutex> lock(mutex);
+    try {
+        while (rtlsdrRunning) {
+            std::unique_lock<std::mutex> lock(mutex);
 
-        if (!connected) {
-            std::clog << "RTL_TCP_CLIENT: Try to connect to server " <<
-                serverAddress << ":" << serverPort << std::endl;
-
-            try {
-                connected = sock.connect(serverAddress, serverPort, 2);
+            if (!rtlsdrRunning) {
+                break;
             }
-            catch(const std::runtime_error& e) {
-                std::clog << "RTL_TCP_CLIENT: " << e.what() << std::endl;
+
+            if (!connected) {
+                std::clog << "RTL_TCP_CLIENT: Try to connect to server " <<
+                    serverAddress << ":" << serverPort << std::endl;
+
+                try {
+                    connected = sock.connect(serverAddress, serverPort, 2);
+                }
+                catch(const std::runtime_error& e) {
+                    std::clog << "RTL_TCP_CLIENT: " << e.what() << std::endl;
+                }
+
+                if (connected) {
+                    std::clog << "RTL_TCP_CLIENT: Successful connected to server " <<
+                        std::endl;
+
+                    // Stop() can race with reconnect. Never launch AGC when
+                    // the input is shutting down.
+                    if (!rtlsdrRunning) {
+                        connected = false;
+                        sock.close();
+                        break;
+                    }
+
+                    if (!agcRunning) {
+                        lock.unlock();
+                        if (agcThread.joinable()) {
+                            agcThread.join();
+                        }
+                        lock.lock();
+
+                        if (rtlsdrRunning && connected) {
+                            agcRunning = true;
+                            agcThread = std::thread(&CRTL_TCP_Client::agcTimer, this);
+                        }
+                    }
+                    firstData = true;
+                    reset(); // Clear buffers
+                }
+                else {
+                    std::clog << "RTL_TCP_CLIENT: Could not connect to server" <<
+                        std::endl;
+
+                    agcRunning = false;
+                    rtlsdrRunning = false;
+                    lock.unlock();
+
+                    radioController.onMessage(message_level_t::Error,
+                            QT_TRANSLATE_NOOP("CRadioController", "Connection failed to server "),
+                            serverAddress + ":" + std::to_string(serverPort));
+                }
             }
 
             if (connected) {
-                std::clog << "RTL_TCP_CLIENT: Successful connected to server " <<
-                    std::endl;
-
-                if (!agcRunning) {
-                    agcRunning = true;
-                    agcThread = std::thread(&CRTL_TCP_Client::agcTimer, this);
+                if (lock.owns_lock()) {
+                    lock.unlock();
                 }
-                firstData = true;
-                reset(); // Clear buffers
-            }
-            else {
-                std::clog << "RTL_TCP_CLIENT: Could not connect to server" <<
-                    std::endl;
 
-                agcRunning = false;
-                rtlsdrRunning = false;
-                lock.unlock();
-
-                radioController.onMessage(message_level_t::Error,
-                        QT_TRANSLATE_NOOP("CRadioController", "Connection failed to server "),
-                        serverAddress + ":" + std::to_string(serverPort));
+                receiveData();
             }
         }
-
-        if (connected) {
-            if (lock.owns_lock()) {
-                lock.unlock();
-            }
-
-            receiveData();
-        }
+    }
+    catch (const std::exception& e) {
+        std::clog << "RTL_TCP_CLIENT receive thread exception: " << e.what() << std::endl;
+        std::unique_lock<std::mutex> lock(mutex);
+        connected = false;
+        agcRunning = false;
+        rtlsdrRunning = false;
+        sock.close();
+    }
+    catch (...) {
+        std::clog << "RTL_TCP_CLIENT receive thread unknown exception" << std::endl;
+        std::unique_lock<std::mutex> lock(mutex);
+        connected = false;
+        agcRunning = false;
+        rtlsdrRunning = false;
+        sock.close();
     }
 }
 
 #define NETWORK_BUFFER_READ_SAMPLES 32768
 void CRTL_TCP_Client::networkBufferCopy()
 {
-    std::vector<uint8_t> tempBuffer(NETWORK_BUFFER_READ_SAMPLES * 2);
+    try {
+        std::vector<uint8_t> tempBuffer(NETWORK_BUFFER_READ_SAMPLES * 2);
 
-    while (rtlsdrRunning) {
-        if(!firstFilledNetworkBuffer) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            nextStop_us = getMyTime();
-            continue;
+        while (rtlsdrRunning) {
+            if(!firstFilledNetworkBuffer) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                nextStop_us = getMyTime();
+                continue;
+            }
+
+            int32_t samples = NETWORK_BUFFER_READ_SAMPLES;
+
+            // Figure out the max samples to read from network buffer
+            int32_t samplesInBuffer = sampleNetworkBuffer.GetRingBufferReadAvailable() / 2;
+            if(samplesInBuffer < samples)
+                samples = samplesInBuffer;
+
+            if(samples == 0) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                nextStop_us = getMyTime();
+                continue;
+            }
+
+            // Read data
+            int32_t amount = sampleNetworkBuffer.getDataFromBuffer(tempBuffer.data(), 2 * samples);
+
+            // Write data to standard buffers
+            sampleBuffer.putDataIntoBuffer(tempBuffer.data(), amount);
+            spectrumSampleBuffer.putDataIntoBuffer(tempBuffer.data(), amount);
+
+            if(getMyTime() - oldTime_us > 500e3) { // 500 ms
+
+                // float bufferFill = (float) sampleNetworkBuffer.GetRingBufferReadAvailable() / sampleNetworkBuffer.GetBufferSize() * 100;
+                //std::clog << "RTL_TCP_CLIENT: Network buffer fill level " << bufferFill << "%" << std::endl;
+
+                oldTime_us = getMyTime();
+            }
+
+
+            uint32_t period_us = samples / ((float) INPUT_RATE / 1e6);
+            nextStop_us += period_us;
+            int64_t timeToWait_us = nextStop_us - getMyTime();
+
+            // Send thread to sleep
+            std::this_thread::sleep_for(std::chrono::microseconds(timeToWait_us));
         }
-
-        int32_t samples = NETWORK_BUFFER_READ_SAMPLES;
-
-        // Figure out the max samples to read from network buffer
-        int32_t samplesInBuffer = sampleNetworkBuffer.GetRingBufferReadAvailable() / 2;
-        if(samplesInBuffer < samples)
-            samples = samplesInBuffer;
-
-        if(samples == 0) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            nextStop_us = getMyTime();
-            continue;
-        }
-
-        // Read data
-        int32_t amount = sampleNetworkBuffer.getDataFromBuffer(tempBuffer.data(), 2 * samples);
-
-        // Write data to standard buffers
-        sampleBuffer.putDataIntoBuffer(tempBuffer.data(), amount);
-        spectrumSampleBuffer.putDataIntoBuffer(tempBuffer.data(), amount);
-
-        if(getMyTime() - oldTime_us > 500e3) { // 500 ms
-
-            // float bufferFill = (float) sampleNetworkBuffer.GetRingBufferReadAvailable() / sampleNetworkBuffer.GetBufferSize() * 100;
-            //std::clog << "RTL_TCP_CLIENT: Network buffer fill level " << bufferFill << "%" << std::endl;
-
-            oldTime_us = getMyTime();
-        }
-
-
-        uint32_t period_us = samples / ((float) INPUT_RATE / 1e6);
-        nextStop_us += period_us;
-        int64_t timeToWait_us = nextStop_us - getMyTime();
-
-        // Send thread to sleep
-        std::this_thread::sleep_for(std::chrono::microseconds(timeToWait_us));
+    }
+    catch (const std::exception& e) {
+        std::clog << "RTL_TCP_CLIENT network thread exception: " << e.what() << std::endl;
+        rtlsdrRunning = false;
+    }
+    catch (...) {
+        std::clog << "RTL_TCP_CLIENT network thread unknown exception" << std::endl;
+        rtlsdrRunning = false;
     }
 }
 
 void CRTL_TCP_Client::agcTimer(void)
 {
-    while (agcRunning) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    try {
+        while (agcRunning) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
-        if (isAGC && (dongleInfo.tuner_type != RTLSDR_TUNER_UNKNOWN)) {
-            // Check for overloading
-            if (minAmplitude == 0 || maxAmplitude == 255) {
-                // We have to decrease the gain
-                if(currentGainCount > 0) {
-                    setGain(currentGainCount - 1);
-                    //std::clog << "RTL_TCP_CLIENT: Decrease gain to " << (float)currentGain << std::endl;
+            if (isAGC && (dongleInfo.tuner_type != RTLSDR_TUNER_UNKNOWN)) {
+                // Check for overloading
+                if (minAmplitude == 0 || maxAmplitude == 255) {
+                    // We have to decrease the gain
+                    if(currentGainCount > 0) {
+                        setGain(currentGainCount - 1);
+                        //std::clog << "RTL_TCP_CLIENT: Decrease gain to " << (float)currentGain << std::endl;
+                    }
                 }
-            }
-            else {
-                if (currentGainCount < (getGainCount() - 1)) {
-                    // Calc if a gain increase overloads the device. Calc it
-                    // from the gain values
-                    const float newGain = getGainValue(currentGainCount + 1);
-                    const float deltaGain = newGain - currentGain;
-                    const float linGain = pow(10, deltaGain / 20);
-                    const int newMaxValue = (float)maxAmplitude * linGain;
-                    const int newMinValue = (float)minAmplitude / linGain;
+                else {
+                    if (currentGainCount < (getGainCount() - 1)) {
+                        // Calc if a gain increase overloads the device. Calc it
+                        // from the gain values
+                        const float newGain = getGainValue(currentGainCount + 1);
+                        const float deltaGain = newGain - currentGain;
+                        const float linGain = pow(10, deltaGain / 20);
+                        const int newMaxValue = (float)maxAmplitude * linGain;
+                        const int newMinValue = (float)minAmplitude / linGain;
 
-                    // We have to increase the gain
-                    if (newMinValue >=0 && newMaxValue <= 255) {
-                        setGain(currentGainCount + 1);
-                        //std::clog << "RTL_TCP_CLIENT: Increase gain to " << currentGain << std::endl;
+                        // We have to increase the gain
+                        if (newMinValue >=0 && newMaxValue <= 255) {
+                            setGain(currentGainCount + 1);
+                            //std::clog << "RTL_TCP_CLIENT: Increase gain to " << currentGain << std::endl;
+                        }
                     }
                 }
             }
-        }
-        else { // AGC is off or unknown tuner
-            if (minAmplitude == 0 || maxAmplitude == 255) {
-                std::string text = QT_TRANSLATE_NOOP("CRadioController", "ADC overload."
-                    " Maybe you are using a too high gain.");
-                std::clog << "RTL_TCP_CLIENT:" << text << std::endl;
-                radioController.onMessage(message_level_t::Information, text);
+            else { // AGC is off or unknown tuner
+                if (minAmplitude == 0 || maxAmplitude == 255) {
+                    std::string text = QT_TRANSLATE_NOOP("CRadioController", "ADC overload."
+                        " Maybe you are using a too high gain.");
+                    std::clog << "RTL_TCP_CLIENT:" << text << std::endl;
+                    radioController.onMessage(message_level_t::Information, text);
+                }
             }
         }
+    }
+    catch (const std::exception& e) {
+        std::clog << "RTL_TCP_CLIENT AGC thread exception: " << e.what() << std::endl;
+        agcRunning = false;
+    }
+    catch (...) {
+        std::clog << "RTL_TCP_CLIENT AGC thread unknown exception" << std::endl;
+        agcRunning = false;
     }
 }
 
@@ -605,4 +710,3 @@ float CRTL_TCP_Client::getGainValue(uint16_t gainCount)
 
     return gainValue;
 }
-

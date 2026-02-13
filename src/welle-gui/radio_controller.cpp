@@ -270,8 +270,9 @@ void CRadioController::stop()
     if (device) {
         device->stop();
     }
-    else
-        throw std::runtime_error("device is null in file " + std::string(__FILE__) +":"+ std::to_string(__LINE__));
+    else {
+        qDebug() << "RadioController: stop requested but no device exists";
+    }
 
     QString title = currentTitle;
     resetTechnicalData();
@@ -409,7 +410,11 @@ void CRadioController::startScan(void)
 
     stop();
 
-    deviceRestart();
+    bool isRestartOk = deviceRestart();
+    if (!isRestartOk) {
+        emit scanStopped();
+        return;
+    }
 
     if(device && device->getID() == CDeviceID::RAWFILE) {
         currentTitle = tr("RAW File");
