@@ -1,0 +1,79 @@
+name: FreeBSD build
+
+on:
+  push:
+    branches:
+      - master
+      - next
+      - "next*"
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build (FreeBSD 14.3)
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - run: git fetch --prune --unshallow --tags
+
+      - name: Build in FreeBSD VM
+        uses: vmactions/freebsd-vm@v1
+        with:
+          release: "14.3"
+          usesh: true
+          prepare: |
+            set -eu
+
+            install_one() {
+              for pkg_name in "$@"; do
+                if pkg install -y "${pkg_name}"; then
+                  return 0
+                fi
+              done
+              echo "Failed to install any of: $*"
+              return 1
+            }
+
+            pkg update -f
+            install_one cmake
+            install_one ninja
+            install_one pkgconf pkg-config
+            install_one git
+            install_one xxd vim
+            install_one qt6-base
+            install_one qt6-tools
+            install_one qt6-declarative
+            install_one qt6-5compat
+            install_one qt6-charts
+            install_one qt6-multimedia
+            install_one fftw3-float fftw3
+            install_one faad2 faad
+            install_one mpg123
+            install_one rtl-sdr librtlsdr
+            install_one airspy
+            install_one SoapySDR soapysdr
+            install_one lame
+            install_one libusb
+          run: |
+            set -eux
+            cmake -S . -B build -G Ninja \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DRTLSDR=ON \
+              -DAIRSPY=ON \
+              -DSOAPYSDR=ON \
+              -DWITH_APP_BUNDLE=OFF \
+              -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+            cmake --build build --parallel
+            ./build/welle-cli -v
+
+      - name: Archive artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: welle.io FreeBSD build artifacts
+          path: |
+            build/welle-cli
+            build/welle-io
+          if-no-files-found: error

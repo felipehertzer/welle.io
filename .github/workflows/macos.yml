@@ -1,0 +1,88 @@
+name: macOS build
+
+on:
+  push:
+    branches:
+      - master
+      - next
+      - "next*"
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build (CMake, macOS 26 arm64)
+    runs-on: macos-26
+
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      HOMEBREW_NO_INSTALL_CLEANUP: "1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - run: git fetch --prune --unshallow --tags
+
+      - name: Install dependencies (Homebrew)
+        run: |
+          brew install \
+            cmake \
+            ninja \
+            pkgconf \
+            qt \
+            fftw \
+            faad2 \
+            mpg123 \
+            libusb \
+            librtlsdr \
+            airspy \
+            soapysdr \
+            lame \
+            flac
+
+      - name: Configure
+        run: |
+          set -euxo pipefail
+
+          mkdir -p build
+          cd build
+
+          QT_PREFIX="$(brew --prefix qt)"
+
+          cmake .. -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES="$(uname -m)" \
+            -DQt6_DIR="$QT_PREFIX/lib/cmake/Qt6" \
+            -DRTLSDR=ON \
+            -DAIRSPY=ON \
+            -DSOAPYSDR=ON \
+            -DWITH_APP_BUNDLE=ON \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Sanity check
+        run: |
+          set -euxo pipefail
+          cd build
+          ./welle-cli -v
+          ./welle-io.app/Contents/MacOS/welle-io -v
+
+      - name: Package artifacts
+        run: |
+          set -euxo pipefail
+          cd build
+
+          ARCH="$(uname -m)"
+          mkdir -p publish
+
+          ditto -c -k --sequesterRsrc --keepParent "welle-io.app" "publish/welle-io-macos-${ARCH}.zip"
+          cp "welle-cli" "publish/welle-cli-macos-${ARCH}"
+
+      - name: Archive artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: welle.io macOS (macOS 26 arm64)
+          path: build/publish/*
+          if-no-files-found: error
